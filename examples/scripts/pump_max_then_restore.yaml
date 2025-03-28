@@ -1,0 +1,16 @@
+alias: Pump Max Then Restore
+mode: single
+sequence:
+  - variables:
+      previous: "{{ states('number.pump_rpm_regulator_pool_pump_rpm') | int }}"
+  - service: number.set_value
+    target:
+      entity_id: number.pump_rpm_regulator_pool_pump_rpm
+    data:
+      value: 2900
+  - delay: "02:00:00"
+  - service: number.set_value
+    target:
+      entity_id: number.pump_rpm_regulator_pool_pump_rpm
+    data:
+      value: "{{ previous }}"

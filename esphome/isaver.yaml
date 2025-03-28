@@ -1,0 +1,185 @@
+esphome:
+  name: pump-rpm-regulator
+  friendly_name: pump_rpm_regulator
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          if (id(pump_rpm).state > 0) {
+            id(pump_rpm).make_call().set_value(id(pump_rpm).state).perform();
+          }
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+
+api:
+  encryption:
+    key: "REDACTED"
+
+ota:
+  - platform: esphome
+    password: "REDACTED"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "Pump-Rpm-Regulator"
+    password: "REDACTED"
+
+web_server:
+  port: 80
+
+captive_portal:
+
+uart:
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 1200
+  stop_bits: 1
+  data_bits: 8
+  parity: NONE
+  id: modbus_uart
+  debug:
+    after:
+      delimiter: "\n"
+
+output:
+  - platform: gpio
+    pin: GPIO05
+    id: modbus_write_enable
+
+text_sensor:
+  - platform: template
+    name: "Modbus Status"
+    id: modbus_status
+
+number:
+  - platform: template
+    name: "Pool Pump RPM"
+    id: pump_rpm
+    min_value: 0
+    max_value: 2900
+    step: 1
+    set_action:
+      then:
+        - lambda: |-
+            id(modbus_write_enable).turn_on();
+            uint16_t rpm = (uint16_t)x;
+            if (rpm < 1200) {
+              rpm = 1;
+            }
+            uint8_t rpm0 = (rpm >> 8) & 0xFF;
+            uint8_t rpm1 = rpm & 0xFF;
+            uint8_t data[6] = {0xAA, 0xD0, 0x0B, 0xB9, rpm0, rpm1};
+            uint16_t crc = 0xFFFF;
+            for (int i = 0; i < 6; i++) {
+              crc ^= data[i];
+              for (int j = 0; j < 8; j++) {
+                if (crc & 0x0001) {
+                  crc >>= 1;
+                  crc ^= 0xA001;
+                } else {
+                  crc >>= 1;
+                }
+              }
+            }
+            uint8_t crc0 = crc & 0xFF;
+            uint8_t crc1 = (crc >> 8) & 0xFF;
+            uint8_t packet[8] = {0xAA, 0xD0, 0x0B, 0xB9, rpm0, rpm1, crc0, crc1};
+            auto uart = id(modbus_uart);
+            uart->write_array(packet, 8);
+            uart->flush();
+            id(modbus_write_enable).turn_off();
+
+sensor:
+  - platform: template
+    name: "Current Pool Pump RPM"
+    id: pump_rpm_state
+    unit_of_measurement: "RPM"
+    accuracy_decimals: 0
+    update_interval: never
+    force_update: false
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          id(modbus_write_enable).turn_on();
+          uint8_t data[6] = {0xAA, 0xC3, 0x07, 0xD1, 0x00, 0x00};
+          uint16_t crc = 0xFFFF;
+          for (int i = 0; i < 6; i++) {
+            crc ^= data[i];
+            for (int j = 0; j < 8; j++) {
+              if (crc & 0x0001) {
+                crc >>= 1;
+                crc ^= 0xA001;
+              } else {
+                crc >>= 1;
+              }
+            }
+          }
+          uint8_t crc0 = crc & 0xFF;
+          uint8_t crc1 = (crc >> 8) & 0xFF;
+          uint8_t packet[8] = {0xAA, 0xC3, 0x07, 0xD1, 0x00, 0x00, crc0, crc1};
+          auto uart = id(modbus_uart);
+          while(uart->available() > 0) {
+            uint8_t t;
+            uart->read_array(&t, 1);
+          }
+          uart->write_array(packet, 8);
+          uart->flush();
+          id(modbus_write_enable).turn_off();
+          uint32_t start_time = millis();
+          while (uart->available() < 8 && (millis() - start_time) < 200) {
+            delay(1);
+          }
+          if (uart->available() >= 7) {
+            uint8_t response[7];
+            uart->read_array(response, 7);
+            id(modbus_status).publish_state("Online");
+            float value = (float)((uint16_t)response[5] << 8 | (uint16_t)response[6]);
+            if (value != id(pump_rpm_state).state) {
+              id(pump_rpm_state).publish_state(value);
+              id(pump_rpm).publish_state(value);
+            }
+          } else {
+            id(modbus_status).publish_state("No Response");
+          }
+
+switch:
+  - platform: template
+    name: "Pool Pump Power"
+    id: pump_power
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          id(pump_rpm).make_call().set_value(2100).perform();
+    turn_off_action:
+      - lambda: |-
+          id(pump_rpm).make_call().set_value(0).perform();
+
+button:
+  - platform: template
+    name: "Pool Pump ECO"
+    on_press:
+      - lambda: |-
+          id(pump_rpm).make_call().set_value(1350).perform();
+
+  - platform: template
+    name: "Pool Pump NORMAL"
+    on_press:
+      - lambda: |-
+          id(pump_rpm).make_call().set_value(1700).perform();
+
+  - platform: template
+    name: "Pool Pump MAX"
+    on_press:
+      - lambda: |-
+          id(pump_rpm).make_call().set_value(2900).perform();
+

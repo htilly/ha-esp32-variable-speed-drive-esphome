@@ -1,0 +1,10 @@
+type: entities
+title: Status
+show_header_toggle: false
+entities:
+  - entity: switch.pump_rpm_regulator_pool_pump_power
+    name: På / Av (Regulator)
+  - entity: sensor.pump_rpm_regulator_current_pool_pump_rpm
+    name: Faktiskt RPM
+  - entity: sensor.pump_rpm_regulator_modbus_status
+    name: Modbus Status

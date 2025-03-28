@@ -1,0 +1,32 @@
+type: horizontal-stack
+cards:
+  - type: button
+    entity: button.pump_rpm_regulator_pool_pump_eco
+    name: Eco
+    icon: mdi:leaf
+    icon_height: 24px
+    tap_action:
+      action: call-service
+      service: button.press
+      data:
+        entity_id: button.pump_rpm_regulator_pool_pump_eco
+  - type: button
+    entity: button.pump_rpm_regulator_pool_pump_normal
+    name: Normal
+    icon: mdi:fan
+    icon_height: 24px
+    tap_action:
+      action: call-service
+      service: button.press
+      data:
+        entity_id: button.pump_rpm_regulator_pool_pump_normal
+  - type: button
+    entity: button.pump_rpm_regulator_pool_pump_max
+    name: Max
+    icon: mdi:rocket
+    icon_height: 24px
+    tap_action:
+      action: call-service
+      service: button.press
+      data:
+        entity_id: button.pump_rpm_regulator_pool_pump_max

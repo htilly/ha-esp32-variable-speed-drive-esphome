@@ -1,0 +1,10 @@
+type: gauge
+entity: sensor.pump_rpm_regulator_current_pool_pump_rpm
+name: Aktuell RPM
+unit: RPM
+min: 0
+max: 2900
+severity:
+  green: 1200
+  yellow: 1600
+  red: 2800

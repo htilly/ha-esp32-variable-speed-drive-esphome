@@ -1,0 +1,8 @@
+type: button
+name: Max RPM for 2h!
+icon: mdi:rocket
+tap_action:
+  action: call-service
+  service: script.pump_max_then_restore
+  data:
+    entity_id: button.pump_rpm_regulator_pool_pump_max
