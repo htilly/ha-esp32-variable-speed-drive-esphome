@@ -136,7 +136,7 @@ interval:
           uart->flush();
           id(modbus_write_enable).turn_off();
           uint32_t start_time = millis();
-          while (uart->available() < 8 && (millis() - start_time) < 200) {
+          while (uart->available() < 8 && (millis() - start_time) < 300) {
             delay(1);
           }
           if (uart->available() >= 7) {
