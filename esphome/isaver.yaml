@@ -1,45 +1,67 @@
+
 esphome:
-  name: pump-rpm-regulator
-  friendly_name: pump_rpm_regulator
+  name: pool-pump
+  friendly_name: pool-pump
   on_boot:
     priority: -100
     then:
+      # Initialise current-run energy tracking
       - lambda: |-
-          if (id(pump_rpm).state > 0) {
-            id(pump_rpm).make_call().set_value(id(pump_rpm).state).perform();
-          }
+          id(last_sample_ms) = millis();
+          id(run_energy_wh) = 0.0f;
+
+      # Keep your existing replay of RPM to the drive
+      - if:
+          condition:
+            lambda: |-
+              return id(modbus_enabled);
+          then:
+            - lambda: |-
+                if (id(pump_rpm).state > 0) {
+                  id(pump_rpm).make_call().set_value(id(pump_rpm).state).perform();
+                }
 
 esp32:
-  board: esp32dev
+  board: seeed_xiao_esp32c3
   framework:
-    type: arduino
+    type: esp-idf
 
 logger:
-
 api:
-  encryption:
-    key: "REDACTED"
-
 ota:
   - platform: esphome
-    password: "REDACTED"
 
 wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-
   ap:
-    ssid: "Pump-Rpm-Regulator"
-    password: "REDACTED"
+    ap_timeout: 1min
+  networks:
+    - ssid: [REDACTED]
+      password: [REDACTED]
 
-web_server:
-  port: 80
+# Optional Bluetooth disabled
+# esp32_ble_tracker:
+# bluetooth_proxy:
+#   active: true
 
 captive_portal:
 
+web_server:
+  port: 80
+  version: 3
+  sorting_groups:  
+    - id: sorting_group_current_operations  
+      name: "Current Operations"  
+      sorting_weight: 10
+    - id: sorting_group_diag  
+      name: "WiFi & System Info"  
+      sorting_weight: 40      
+
+# -------------------------------
+# UART / RS-485
+# -------------------------------
 uart:
-  tx_pin: GPIO17
-  rx_pin: GPIO16
+  tx_pin: GPIO21
+  rx_pin: GPIO20
   baud_rate: 1200
   stop_bits: 1
   data_bits: 8
@@ -54,10 +76,102 @@ output:
     pin: GPIO05
     id: modbus_write_enable
 
+# -------------------------------
+# Modbus enable/disable + timing guard
+# -------------------------------
+globals:
+  - id: modbus_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+
+  # Track last write time to pause polling briefly afterwards
+  - id: last_write_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  # Accumulated energy during the current run (in Wh)
+  - id: run_energy_wh
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+  # Timestamp of the last accumulation sample (in ms)
+  - id: last_sample_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+# -------------------------------
+# Status / UI
+# -------------------------------
 text_sensor:
   - platform: template
     name: "Modbus Status"
     id: modbus_status
+    # Force RPM to 0 whenever status is not "Online"
+    on_value:
+      then:
+        - lambda: |-
+            if (id(modbus_status).state != "Online") {
+              // Avoid redundant publishes
+              if (id(pump_rpm_state).state != 0) {
+                id(pump_rpm_state).publish_state(0);
+              }
+              // Keep the visible number in sync too
+              if (id(pump_rpm).state != 0) {
+                id(pump_rpm).publish_state(0);
+              }
+            }
+
+# Text sensors: network info, human-readable uptime, ESPHome version, heartbeat
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      web_server:  
+        sorting_group_id: sorting_group_diag
+    ssid:
+      name: "WiFi SSID"
+      web_server:  
+        sorting_group_id: sorting_group_diag
+    bssid:
+      name: "WiFi BSSID"
+      web_server:  
+        sorting_group_id: sorting_group_diag
+    mac_address:
+      name: "MAC Address"
+      web_server:  
+        sorting_group_id: sorting_group_diag
+
+  - platform: template
+    name: "Uptime (friendly)"
+    id: uptime_friendly
+    update_interval: 30s
+    lambda: |-
+      uint32_t secs = (uint32_t) id(uptime_s).state;
+      uint32_t days = secs / 86400;
+      uint32_t hours = (secs % 86400) / 3600;
+      uint32_t minutes = (secs % 3600) / 60;
+      uint32_t seconds = secs % 60;
+      char buffer[64];
+      if (days > 0) {
+        snprintf(buffer, sizeof(buffer), "%u d %u h %u m %u s", days, hours, minutes, seconds);
+      } else if (hours > 0) {
+        snprintf(buffer, sizeof(buffer), "%u h %u m %u s", hours, minutes, seconds);
+      } else if (minutes > 0) {
+        snprintf(buffer, sizeof(buffer), "%u m %u s", minutes, seconds);
+      } else {
+        snprintf(buffer, sizeof(buffer), "%u s", seconds);
+      }
+      return std::string(buffer);
+    web_server:  
+      sorting_group_id: sorting_group_diag
+
+  - platform: version
+    name: "ESPHome Version"
+    web_server:  
+      sorting_group_id: sorting_group_diag            
 
 number:
   - platform: template
@@ -67,35 +181,46 @@ number:
     max_value: 2900
     step: 1
     set_action:
-      then:
-        - lambda: |-
-            id(modbus_write_enable).turn_on();
-            uint16_t rpm = (uint16_t)x;
-            if (rpm < 1200) {
-              rpm = 1;
-            }
-            uint8_t rpm0 = (rpm >> 8) & 0xFF;
-            uint8_t rpm1 = rpm & 0xFF;
-            uint8_t data[6] = {0xAA, 0xD0, 0x0B, 0xB9, rpm0, rpm1};
-            uint16_t crc = 0xFFFF;
-            for (int i = 0; i < 6; i++) {
-              crc ^= data[i];
-              for (int j = 0; j < 8; j++) {
-                if (crc & 0x0001) {
-                  crc >>= 1;
-                  crc ^= 0xA001;
-                } else {
-                  crc >>= 1;
+      - if:
+          condition:
+            lambda: |-
+              return id(modbus_enabled);
+          then:
+            - lambda: |-
+                id(modbus_write_enable).turn_on();
+                uint16_t rpm = (uint16_t)x;
+                // Vendor-specific logic: <1200 means "off/stop" command
+                if (rpm < 1200) {
+                  rpm = 1;
                 }
-              }
-            }
-            uint8_t crc0 = crc & 0xFF;
-            uint8_t crc1 = (crc >> 8) & 0xFF;
-            uint8_t packet[8] = {0xAA, 0xD0, 0x0B, 0xB9, rpm0, rpm1, crc0, crc1};
-            auto uart = id(modbus_uart);
-            uart->write_array(packet, 8);
-            uart->flush();
-            id(modbus_write_enable).turn_off();
+                // Build write frame AA D0 0B B9 <rpm_hi> <rpm_lo> <CRClo> <CRChi>
+                uint8_t rpm_hi = (rpm >> 8) & 0xFF;
+                uint8_t rpm_lo = rpm & 0xFF;
+                uint8_t base[6] = {0xAA, 0xD0, 0x0B, 0xB9, rpm_hi, rpm_lo};
+                uint16_t crc = 0xFFFF;
+                for (int i = 0; i < 6; i++) {
+                  crc ^= base[i];
+                  for (int j = 0; j < 8; j++) {
+                    if (crc & 0x0001) { crc >>= 1; crc ^= 0xA001; }
+                    else { crc >>= 1; }
+                  }
+                }
+                uint8_t packet[8] = {base[0], base[1], base[2], base[3], base[4], base[5],
+                                     (uint8_t)(crc & 0xFF), (uint8_t)((crc >> 8) & 0xFF)};
+                auto uart = id(modbus_uart);
+                // Clear any leftover bytes before writing
+                while (uart->available() > 0) {
+                  uint8_t t;
+                  uart->read_array(&t, 1);
+                }
+                uart->write_array(packet, 8);
+                uart->flush();
+                id(modbus_write_enable).turn_off();
+                // Mark last write time and pause polling briefly
+                id(last_write_ms) = millis();
+            - delay: 500ms
+          else:
+            - logger.log: "Modbus disabled: skipping RPM write"
 
 sensor:
   - platform: template
@@ -106,80 +231,327 @@ sensor:
     update_interval: never
     force_update: false
 
+  # Empirical best-fit power from RPM (forced to 976 W @ 2900 RPM)
+  - platform: template
+    name: "Pump Power (W)"
+    id: pump_power_w
+    device_class: power
+    state_class: measurement
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    update_interval: 1s
+    icon: "mdi:flash"
+    lambda: |-
+      float rpm = id(pump_rpm_state).state;
+      if (rpm <= 0.0f) return 0.0f;
+      const float k = 5.75672131e-07f;   // global best-fit, forced through 2900 RPM = 976 W
+      const float b = 2.665573f;
+      return k * powf(rpm, b);
+    web_server:
+      sorting_group_id: sorting_group_current_operations
+
+  # Flow is approximately linear with RPM (reference: 230 L/min @ 2900 RPM)
+  - platform: template
+    name: "Pump Flow (L/min)"
+    id: pump_flow_lmin
+    unit_of_measurement: "L/min"
+    accuracy_decimals: 1
+    update_interval: 1s
+    icon: "mdi:water-pump"
+    lambda: |-
+      float rpm = id(pump_rpm_state).state;
+      if (rpm <= 0.0f) return 0.0f;
+      return 230.0f * (rpm / 2900.0f);
+    web_server:
+      sorting_group_id: sorting_group_current_operations
+
+  # Present the current run energy (kWh) from our accumulator
+  - platform: template
+    name: "Pump Energy (kWh, current run)"
+    id: pump_energy_run_kwh
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: measurement
+    accuracy_decimals: 3
+    update_interval: 2s
+    lambda: |-
+      return id(run_energy_wh) * 0.001f;  // Wh to kWh
+    web_server:
+      sorting_group_id: sorting_group_current_operations
+
+# =========================
+# Diagnostics
+# =========================
+  - platform: wifi_signal
+    name: "WiFi Signal (dB)"
+    id: wifi_rssi_db
+    update_interval: 30s
+    web_server:  
+      sorting_group_id: sorting_group_diag
+
+  - platform: internal_temperature  
+    name: "ESP Internal Temperature" 
+    web_server:  
+      sorting_group_id: sorting_group_diag
+
+  - platform: template
+    name: "WiFi Signal (%)"
+    id: wifi_signal_pct
+    update_interval: 30s
+    lambda: |-
+      // Map typical RSSI range [-90dB .. -30dB] to [0 .. 100%]
+      float rssi = id(wifi_rssi_db).state;
+      float pct = (rssi + 90.0f) * (100.0f / 60.0f);  // -90 -> 0%, -30 -> 100%
+      if (pct < 0) pct = 0;
+      if (pct > 100) pct = 100;
+      return pct;
+    unit_of_measurement: "%"
+    icon: "mdi:wifi"
+    web_server:  
+      sorting_group_id: sorting_group_diag
+
+  - platform: uptime
+    name: "Uptime (s)"
+    id: uptime_s
+    update_interval: 30s      
+    web_server:  
+      sorting_group_id: sorting_group_diag    
+
+# -------------------------------
+# Poll loop (guarded by modbus_enabled, validated frame)
+# -------------------------------
 interval:
   - interval: 1s
     then:
+      - if:
+          condition:
+            lambda: |-
+              return id(modbus_enabled);
+          then:
+            - lambda: |-
+                // Skip polling briefly after a write to avoid race conditions
+                if ((millis() - id(last_write_ms)) < 600) {
+                  // Optional status hint:
+                  // id(modbus_status).publish_state("Write Pause");
+                  return;
+                }
+
+                auto uart = id(modbus_uart);
+
+                // Clear stale bytes to avoid misaligned frames
+                while (uart->available() > 0) {
+                  uint8_t t;
+                  uart->read_array(&t, 1);
+                }
+
+                // Build READ packet AA C3 07 D1 00 00 <CRClo> <CRChi>
+                uint8_t req[6] = {0xAA, 0xC3, 0x07, 0xD1, 0x00, 0x00};
+                uint16_t crc = 0xFFFF;
+                for (int i = 0; i < 6; i++) {
+                  crc ^= req[i];
+                  for (int j = 0; j < 8; j++) {
+                    if (crc & 0x0001) { crc >>= 1; crc ^= 0xA001; }
+                    else { crc >>= 1; }
+                  }
+                }
+                uint8_t packet[8] = {req[0], req[1], req[2], req[3], req[4], req[5],
+                                     (uint8_t)(crc & 0xFF), (uint8_t)((crc >> 8) & 0xFF)};
+
+                // Enable TX, send, then disable TX
+                id(modbus_write_enable).turn_on();
+                uart->write_array(packet, 8);
+                uart->flush();
+                id(modbus_write_enable).turn_off();
+
+                // Wait for at least 7 bytes (AA C3 00 00 01 RPM_HI RPM_LO) with longer timeout
+                uint32_t start = millis();
+                while (uart->available() < 7 && (millis() - start) < 800) {
+                  delay(1);
+                }
+
+                if (uart->available() >= 7) {
+                  // Read up to 32 bytes to allow resync past noise/FF
+                  uint8_t buf[32];
+                  size_t available = uart->available();
+                  if (available > sizeof(buf)) available = sizeof(buf);
+                  size_t n = available;
+                  uart->read_array(buf, n);
+
+                  // Find a valid frame start: AA C3 00 00 01
+                  int si = -1;
+                  for (size_t i = 0; i + 6 < n; i++) {
+                    if (buf[i] == 0xAA && buf[i+1] == 0xC3 &&
+                        buf[i+2] == 0x00 && buf[i+3] == 0x00 && buf[i+4] == 0x01) {
+                      si = (int)i;
+                      break;
+                    }
+                  }
+
+                  if (si >= 0 && (si + 6) < (int)n) {
+                    // Extract RPM from bytes [si+5]=HI, [si+6]=LO
+                    uint16_t raw = ((uint16_t)buf[si+5] << 8) | (uint16_t)buf[si+6];
+
+                    // Sanity filter: accept only plausible RPM range
+                    if (raw > 500 && raw < 4000) {
+                      if (raw != (uint16_t)id(pump_rpm_state).state) {
+                        id(pump_rpm_state).publish_state(raw);
+                        id(pump_rpm).publish_state(raw);
+                      }
+                      id(modbus_status).publish_state("Online");
+                    } else {
+                      // Ignore spurious values (e.g., 1 or 265)
+                      // Optionally: id(modbus_status).publish_state("Spurious");
+                    }
+                  } else {
+                    // No valid header sequence found; ignore this batch
+                    // Optionally: id(modbus_status).publish_state("No Header");
+                  }
+                } else {
+                  id(modbus_status).publish_state("No Response");
+                }
+          else:
+            - text_sensor.template.publish:
+                id: modbus_status
+                state: "Disabled"
+
+  - interval: 1s
+    then:
       - lambda: |-
-          id(modbus_write_enable).turn_on();
-          uint8_t data[6] = {0xAA, 0xC3, 0x07, 0xD1, 0x00, 0x00};
-          uint16_t crc = 0xFFFF;
-          for (int i = 0; i < 6; i++) {
-            crc ^= data[i];
-            for (int j = 0; j < 8; j++) {
-              if (crc & 0x0001) {
-                crc >>= 1;
-                crc ^= 0xA001;
-              } else {
-                crc >>= 1;
-              }
-            }
-          }
-          uint8_t crc0 = crc & 0xFF;
-          uint8_t crc1 = (crc >> 8) & 0xFF;
-          uint8_t packet[8] = {0xAA, 0xC3, 0x07, 0xD1, 0x00, 0x00, crc0, crc1};
-          auto uart = id(modbus_uart);
-          while(uart->available() > 0) {
-            uint8_t t;
-            uart->read_array(&t, 1);
-          }
-          uart->write_array(packet, 8);
-          uart->flush();
-          id(modbus_write_enable).turn_off();
-          uint32_t start_time = millis();
-          while (uart->available() < 8 && (millis() - start_time) < 300) {
-            delay(1);
-          }
-          if (uart->available() >= 7) {
-            uint8_t response[7];
-            uart->read_array(response, 7);
-            id(modbus_status).publish_state("Online");
-            float value = (float)((uint16_t)response[5] << 8 | (uint16_t)response[6]);
-            if (value != id(pump_rpm_state).state) {
-              id(pump_rpm_state).publish_state(value);
-              id(pump_rpm).publish_state(value);
-            }
+          // Compute delta time since last sample
+          uint32_t now_ms = millis();
+          uint32_t dt_ms = now_ms - id(last_sample_ms);
+          id(last_sample_ms) = now_ms;
+
+          // Only accumulate when the pump is running and power is positive
+          float power_w = id(pump_power_w).state;  // Watts
+          bool running = id(pump_running).state;
+
+          if (running && power_w > 0.0f) {
+            // Wh += W * (dt_seconds / 3600)
+            float dt_s = dt_ms / 1000.0f;
+            id(run_energy_wh) += power_w * (dt_s / 3600.0f);
           } else {
-            id(modbus_status).publish_state("No Response");
+            // Do nothing when not running; we keep the last run energy until reset
+            ;
           }
 
+# -------------------------------
+# Controls
+# -------------------------------
 switch:
+  - platform: template
+    name: "Modbus Enabled"
+    id: modbus_enabled_switch
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          id(modbus_enabled) = true;
+          id(modbus_status).publish_state("Online");
+    turn_off_action:
+      - lambda: |-
+          id(modbus_enabled) = false;
+          id(modbus_status).publish_state("Disabled");
+
   - platform: template
     name: "Pool Pump Power"
     id: pump_power
     optimistic: true
     turn_on_action:
-      - lambda: |-
-          id(pump_rpm).make_call().set_value(2100).perform();
+      - if:
+          condition:
+            lambda: |-
+              return id(modbus_enabled);
+          then:
+            - lambda: |-
+                id(pump_rpm).make_call().set_value(2100).perform();
+          else:
+            - logger.log: "Modbus disabled: skipping Power ON"
     turn_off_action:
-      - lambda: |-
-          id(pump_rpm).make_call().set_value(0).perform();
+      - if:
+          condition:
+            lambda: |-
+              return id(modbus_enabled);
+          then:
+            - lambda: |-
+                id(pump_rpm).make_call().set_value(0).perform();
+          else:
+            - logger.log: "Modbus disabled: skipping Power OFF"
 
 button:
   - platform: template
     name: "Pool Pump ECO"
     on_press:
-      - lambda: |-
-          id(pump_rpm).make_call().set_value(1350).perform();
+      - if:
+          condition:
+            lambda: |-
+              return id(modbus_enabled);
+          then:
+            - lambda: |-
+                id(pump_rpm).make_call().set_value(1350).perform();
+          else:
+            - logger.log: "Modbus disabled: ECO skipped"
 
   - platform: template
     name: "Pool Pump NORMAL"
     on_press:
-      - lambda: |-
-          id(pump_rpm).make_call().set_value(1700).perform();
+      - if:
+          condition:
+            lambda: |-
+              return id(modbus_enabled);
+          then:
+            - lambda: |-
+                id(pump_rpm).make_call().set_value(1700).perform();
+          else:
+            - logger.log: "Modbus disabled: NORMAL skipped"
 
   - platform: template
     name: "Pool Pump MAX"
     on_press:
-      - lambda: |-
-          id(pump_rpm).make_call().set_value(2900).perform();
+      - if:
+          condition:
+            lambda: |-
+              return id(modbus_enabled);
+          then:
+            - lambda: |-
+                id(pump_rpm).make_call().set_value(2900).perform();
+          else:
+            - logger.log: "Modbus disabled: MAX skipped"
 
+  - platform: template
+    name: "Reset Pump Run Energy"
+    id: reset_run_energy_btn
+    on_press:
+      - lambda: |-
+          id(run_energy_wh) = 0.0f;
+          // Reset sample clock to avoid a big dt on next tick
+          id(last_sample_ms) = millis();
+
+# Buttons: restart / safe mode
+  - platform: restart
+    name: "Restart ESP32"
+    id: restart_button
+    web_server:  
+      sorting_group_id: sorting_group_diag
+
+  - platform: safe_mode
+    name: "Boot to Safe Mode"
+    id: safe_mode_button
+    web_server:  
+      sorting_group_id: sorting_group_diag            
+
+binary_sensor:
+  - platform: status  
+    name: "ESP32 Status"  
+    device_class: connectivity  
+    web_server:  
+      sorting_group_id: sorting_group_diag
+
+  - platform: template
+    name: "Pump Running"
+    id: pump_running
+    device_class: running
+    lambda: |-
+      // Consider the pump running when RPM is >= 1200; adjust if needed
+      return id(pump_rpm_state).state >= 1200;
+    web_server:
+      sorting_group_id: sorting_group_current_operations
