@@ -145,6 +145,7 @@ interval:
           uart->write_array(packet, 8);
           uart->flush();
           id(modbus_write_enable).turn_off();
+          ESP_LOGD("pool_pump", "Bytes available after TX: %d", uart->available());
           uint32_t start_time = millis();
           while (uart->available() < 7 && (millis() - start_time) < 300) {
             delay(1);
@@ -152,6 +153,9 @@ interval:
           if (uart->available() >= 7) {
             uint8_t response[7];
             uart->read_array(response, 7);
+            ESP_LOGD("pool_pump", "Response (%d bytes avail): %02X %02X %02X %02X %02X %02X %02X",
+              uart->available() + 7,
+              response[0], response[1], response[2], response[3], response[4], response[5], response[6]);
             if (response[0] == 0xAA && response[1] == 0xC3) {
               id(modbus_status).publish_state("Online");
               uint16_t raw = ((uint16_t)response[5] << 8 | response[6]);
