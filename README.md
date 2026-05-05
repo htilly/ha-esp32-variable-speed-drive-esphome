@@ -170,7 +170,22 @@ It shows:
 
 ### Wrong or missing RPM readings
 
-If you can send commands to the pump but RPM readings are incorrect or absent, enable `DEBUG` logging in ESPHome and check the serial output. The config emits two diagnostic log lines per poll cycle:
+If you can send commands to the pump but RPM readings are incorrect or absent, enable `DEBUG` logging in ESPHome and check the serial output.
+
+Add or update the `logger` block in your YAML to set the log level:
+
+```yaml
+logger:
+  level: DEBUG
+```
+
+Then flash the device and open the ESPHome log viewer — either via the ESPHome dashboard ("Logs" button) or with:
+
+```bash
+esphome logs pool-pump-wifi.yaml
+```
+
+The config emits two diagnostic log lines per poll cycle:
 
 - **`Bytes available after TX`** — if this is non-zero, your RS485 module is echoing transmitted bytes back on RX (common when RE/DE direction control is missing or wired incorrectly).
 - **`Response (N bytes avail): XX XX XX XX XX XX XX`** — the full raw 7-byte response frame in hex. Share this if your RPM values look wrong — your drive may use a different byte offset than the iSAVER+ 1100 this was built for.
